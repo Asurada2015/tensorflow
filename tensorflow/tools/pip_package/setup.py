@@ -29,10 +29,10 @@ from setuptools.dist import Distribution
 # This version string is semver compatible, but incompatible with pip.
 # For pip, we will remove all '-' characters from this string, and use the
 # result for pip.
-_VERSION = '1.3.0-rc2'
+_VERSION = '1.3.0'
 
 REQUIRED_PACKAGES = [
-    'numpy >= 1.11.0',
+    'numpy >= 1.12.1',
     'six >= 1.10.0',
     'protobuf >= 3.3.0',
     'tensorflow-tensorboard >= 0.1.0, < 0.2.0',
