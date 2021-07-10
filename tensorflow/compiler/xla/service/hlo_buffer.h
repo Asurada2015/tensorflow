@@ -54,7 +54,7 @@ namespace xla {
 // HloValue{%cond_param}.
 //
 // HloBuffers may appear at different HloPositions in the module mirroring the
-// same propery of HloValues. For example:
+// same property of HloValues. For example:
 //
 //   %sub = Sub(...)
 //   %add = Add(...)
@@ -84,21 +84,25 @@ class HloBuffer {
     return a->id() == b->id();
   }
 
-  HloBuffer(Id id) : id_(id) {}
+  HloBuffer(Id id, absl::Span<const HloValue* const> values)
+      : id_(id), values_(values.begin(), values.end()) {}
 
   // Return the unique identifier for this HloBuffer.
   Id id() const { return id_; }
 
-  // Add a value to the set of values held by this buffer. Also adds the
-  // HloPositions of the value to the positions vector of the buffer. If the
-  // buffer already contains this value, then this method is a nop.
-  void AddValue(const HloValue& value);
-  void RemoveValue(const HloValue& value);
-
   // Return all values contained in this buffer.
   const std::vector<const HloValue*>& values() const { return values_; }
 
-  std::vector<HloPosition> ComputePositions() const;
+  // Memory space color. Used to indicate the memory space that the hlo buffer
+  // needs to live in.
+  BufferValue::Color color() const {
+    // Invariant: All values in the buffer should have the same color.
+    BufferValue::Color result = values()[0]->color();
+    for (const HloValue* value : values()) {
+      DCHECK_EQ(result, value->color());
+    }
+    return result;
+  }
 
   // Return the unique HLO value in the buffer. CHECK fails if the buffer does
   // not contain exactly one value.
@@ -107,6 +111,8 @@ class HloBuffer {
     return *values_[0];
   }
 
+  std::vector<HloPosition> ComputePositions() const;
+
   string ToString() const;
 
   bool operator==(const HloBuffer& other) const;
@@ -114,7 +120,7 @@ class HloBuffer {
 
  private:
   // Unique identifier for this HloBuffer.
-  const Id id_;
+  Id id_;
 
   // The set of values contained in this buffer. Vector contains no duplicates
   // and is sorted stably by HloValue::Id.

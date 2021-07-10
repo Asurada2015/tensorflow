@@ -20,15 +20,17 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/xla/service/hlo_buffer.h"
 #include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
+#include "tensorflow/compiler/xla/service/hlo_ordering.h"
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/platform/macros.h"
 
 namespace xla {
@@ -38,7 +40,9 @@ class HloAliasAnalysis {
  public:
   // The callgraph of the given HloModule must be flattened
   // (xla::FlattenCallGraph) prior to running the analysis.
-  static StatusOr<std::unique_ptr<HloAliasAnalysis>> Run(HloModule* module);
+  static StatusOr<std::unique_ptr<HloAliasAnalysis>> Run(
+      const HloModule* module,
+      const HloDataflowAnalysis::CanShareBuffer& can_share_buffer = nullptr);
 
   string ToString() const;
 
@@ -74,12 +78,10 @@ class HloAliasAnalysis {
   // Return a vector of all HloBuffers stabily sorted by HloBuffer::Id. This
   // vector is lazily computed. Mutating operations on HloAliasAnalysis may
   // invalidate the underlying vector requiring recomputation.
-  const std::vector<const HloBuffer*>& buffers() const;
+  const std::vector<HloBuffer>& buffers() const { return buffers_; }
 
   // Returns the underlying dataflow analysis used by this alias analysis.
-  const HloDataflowAnalysis& dataflow_analysis() const {
-    return *dataflow_analysis_;
-  }
+  HloDataflowAnalysis& dataflow_analysis() const { return *dataflow_analysis_; }
 
   // Returns true if any index in the output of the given instruction has more
   // than one buffer. That is, ComputeBuffersAt returns a vector with more than
@@ -90,73 +92,54 @@ class HloAliasAnalysis {
   // output of the given instruction.
   bool InstructionBuffersAreDistinct(const HloInstruction* instruction) const;
 
-  // Updates the analysis after the operands of 'instruction' have changed or if
-  // 'instruction' has been made the root of a computation. Analysis update is
-  // not possible if instructions have been added or removed from the graph.
-  void UpdateAfterChangingOperand(HloInstruction* instruction,
-                                  HloInstruction* old_operand,
-                                  HloInstruction* new_operand);
-  void UpdateAfterChangingRoot(HloInstruction* old_root,
-                               HloInstruction* new_root);
+  // Merge buffer `from` into buffer `to`. Caller has to make sure no
+  // interference will be introduced after merging. This rebuilds internal data
+  // structure, and invalidates references to all existing buffers.
+  void MergeBuffers(const HloBuffer& to, const HloBuffer& from);
 
-  // Compare the dataflow analysis against a clean recomputation of the
-  // analysis. Returns an error status if there is a mismatch. Useful for
-  // verifying the correctness after updates to the analysis.
-  Status VerifyAgainstReference() const;
+  // Returns true if any HLO values in the module have interfering live ranges
+  // assuming the given ordering.
+  bool HasLiveRangeInterference(const HloOrdering& ordering) const;
+
+  // Returns true if a buffer lives out of the module.
+  bool BufferLivesOut(const HloBuffer& buffer) const {
+    return live_out_buffers_.count(&buffer);
+  }
+
+  // Returns true if a hlo value lives out of the module.
+  bool ValueLivesOut(const HloValue& value) const {
+    return live_out_buffers_.count(&GetBufferContainingValue(value));
+  }
+
+  std::vector<const HloBuffer*> LiveOutBuffers() const {
+    std::vector<const HloBuffer*> results(live_out_buffers_.begin(),
+                                          live_out_buffers_.end());
+    absl::c_sort(results, [](const HloBuffer* a, const HloBuffer* b) {
+      return a->id() < b->id();
+    });
+    return results;
+  }
 
  protected:
-  HloAliasAnalysis(HloModule* module);
-
-  // Create a new empty HloBuffer.
-  HloBuffer& NewHloBuffer();
-
-  // Move the given value to the given buffer. The value is removed from it's
-  // current buffer.
-  void MoveValueToBuffer(const HloValue& value, HloBuffer* buffer);
-
-  // Move the given value to a newly created buffer. The value is removed from
-  // it's current buffer.
-  void MoveValueToNewBuffer(const HloValue& value);
-
-  // Construct the initial set of buffer sets where an HloBuffer is created for
-  // each HloValue in the module.
-  void InitializeBufferSets();
-
-  // Compute and return the buffers with aliasing rules (eg, kWhile) which the
-  // given value must be contained in.
-  std::vector<HloBuffer*> ComputeAliasedBuffers(const HloValue& value);
-
-  // Recompute the HloBuffers for the given values.
-  void UpdateBuffersForValues(
-      tensorflow::gtl::ArraySlice<const HloValue*> values);
-
-  // Recompute the HloBuffers for all the values which appear in the output of
-  // the given instructions.
-  void UpdateAtInstructions(
-      tensorflow::gtl::ArraySlice<const HloInstruction*> instructions);
+  explicit HloAliasAnalysis(const HloModule* module);
 
   // Verify various invariants of the alias analysis.
   Status Verify() const;
 
-  HloModule* module_;
+  const HloModule* module_;
+
+  // A set of buffers that live out the module.
+  absl::flat_hash_set<const HloBuffer*> live_out_buffers_;
 
   // The underlying dataflow analysis used by this alias analysis.
   std::unique_ptr<HloDataflowAnalysis> dataflow_analysis_;
 
-  // The map of all HloBuffers in the module. We pass around pointers to the
-  // mapped HloBuffers, so the underlying container must keep them valid despite
-  // mutations touching other map entries.
-  std::unordered_map<HloBuffer::Id, HloBuffer> buffers_;
-
   // A map indicating which buffer a value is contained in.
-  tensorflow::gtl::FlatMap<const HloValue*, HloBuffer*> value_to_buffer_;
+  absl::flat_hash_map<const HloValue*, HloBuffer*> value_to_buffer_;
 
   // A lazily constructed vector containing all HloBuffers sorted by
   // HloBuffer::Id.
-  mutable std::vector<const HloBuffer*> buffers_vector_;
-
-  // The Id to use for the next HloBuffer.
-  int64 next_buffer_id_ = 0;
+  std::vector<HloBuffer> buffers_;
 };
 
 }  // namespace xla
